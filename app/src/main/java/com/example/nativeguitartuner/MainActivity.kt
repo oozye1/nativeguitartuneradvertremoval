@@ -41,7 +41,6 @@ import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.*
-import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
@@ -52,6 +51,7 @@ import androidx.compose.ui.viewinterop.AndroidView
 import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
 import androidx.core.content.edit
+import androidx.lifecycle.lifecycleScope
 import be.tarsos.dsp.AudioDispatcher
 import be.tarsos.dsp.AudioEvent
 import be.tarsos.dsp.AudioProcessor
@@ -86,20 +86,14 @@ class MainActivity : ComponentActivity() {
         private const val PITCH_BUFFER_SIZE = 5
         private const val IN_TUNE_DELAY_MS = 2500L
         private const val IN_TUNE_CENTS_THRESHOLD = 3.0f
-
         private const val PREFS_NAME = "TunerPrefs"
         private const val PREF_PEDAL_SKIN = "pedal_skin"
         private const val PREF_VDU_SKIN = "vdu_skin"
-
-        // Maximum size of the scrolling waveform buffer to prevent memory issues
-        private const val SCROLLING_WAVEFORM_MAX_SIZE = 16384 // approx. 4 screen widths
+        private const val SCROLLING_WAVEFORM_MAX_SIZE = 16384
     }
 
-    // Ad state variables
     private var nativeAd by mutableStateOf<NativeAd?>(null)
     private var isAdVisible by mutableStateOf(false)
-
-    // State Variables
     private var isRecording by mutableStateOf(false)
     private var detectedNote by mutableStateOf("--")
     private var frequencyText by mutableStateOf("0.00 Hz")
@@ -116,29 +110,18 @@ class MainActivity : ComponentActivity() {
     private var metronomeJob: Job? = null
     private var visualizerMode by mutableStateOf(VisualizerMode.WAVEFORM)
     private var magnitudes by mutableStateOf(floatArrayOf())
-
-    // A persistent, accumulating buffer for the scrolling waveform visualizer
     private var scrollingWaveformData by mutableStateOf<List<Float>>(emptyList())
-
     private var soundsLoaded by mutableStateOf(false)
     private var selectedPedal by mutableIntStateOf(R.drawable.red)
     private var selectedVDU by mutableIntStateOf(R.drawable.dial)
-
-    // Audio Processing and System
     private var dispatcher: AudioDispatcher? = null
     private var audioThread: Thread? = null
-    private val activityScope = CoroutineScope(Dispatchers.Main + SupervisorJob())
-    private var isActiveTuner by mutableStateOf(true)
     private lateinit var soundPool: SoundPool
     private var soundUp = 0; private var soundDown = 0; private var soundIntune = 0; private var soundTick = 0
-
-    // Timing and Buffers
     private var lastFeedbackTime = 0L
     private val pitchBuffer = mutableListOf<Float>()
     private var inTuneStartTime = 0L
     private var inTuneSoundPlayed = false
-
-    // App Resources
     private lateinit var pedalImages: List<Int>
     private lateinit var vduImages: List<Int>
     private lateinit var timeSignatures: List<String>
@@ -150,9 +133,22 @@ class MainActivity : ComponentActivity() {
         MobileAds.initialize(this) {}
         loadAd()
 
+        // --- BUG FIX 1: BULLETPROOF SKIN LOADING ---
         val prefs = getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
-        selectedPedal = prefs.getInt(PREF_PEDAL_SKIN, R.drawable.dovercastle1)
-        selectedVDU = prefs.getInt(PREF_VDU_SKIN, R.drawable.dial)
+        try {
+            val loadedPedalId = prefs.getInt(PREF_PEDAL_SKIN, R.drawable.dovercastle1)
+            val loadedVduId = prefs.getInt(PREF_VDU_SKIN, R.drawable.dial)
+            resources.getResourceName(loadedPedalId)
+            resources.getResourceName(loadedVduId)
+            selectedPedal = loadedPedalId
+            selectedVDU = loadedVduId
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to load skins, likely due to invalid preference data. Resetting to default.", e)
+            selectedPedal = R.drawable.dovercastle1
+            selectedVDU = R.drawable.dial
+            prefs.edit { clear() }
+        }
+        // --- END BUG FIX 1 ---
 
         pedalImages = listOf(
             R.drawable.vintage_drive_pedal, R.drawable.blue_delay_pedal, R.drawable.wood, R.drawable.wood2, R.drawable.punk, R.drawable.taj,
@@ -174,19 +170,30 @@ class MainActivity : ComponentActivity() {
                 else window.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
             }
 
+            // --- BUG FIX 2: STABLE NEEDLE ANIMATION ---
+            LaunchedEffect(Unit) {
+                while (true) {
+                    delay(16)
+                    val smoothing = 0.1f
+                    if (abs(smoothedAngle - rotationAngle) > 0.01f) {
+                        smoothedAngle += (rotationAngle - smoothedAngle) * smoothing
+                    } else if (smoothedAngle != rotationAngle) {
+                        smoothedAngle = rotationAngle
+                    }
+                }
+            }
+            // --- END BUG FIX 2 ---
+
             MaterialTheme {
                 Surface(modifier = Modifier.fillMaxSize()) {
                     Box(modifier = Modifier.fillMaxSize()) {
                         Image(painter = painterResource(id = selectedPedal), contentDescription = null, modifier = Modifier.fillMaxSize())
                         Column(
-                            modifier = Modifier
-                                .align(Alignment.TopCenter)
-                                .padding(top = 24.dp),
+                            modifier = Modifier.align(Alignment.TopCenter).padding(top = 24.dp),
                             horizontalAlignment = Alignment.CenterHorizontally
                         ) {
                             MetronomeControls(enabled = soundsLoaded)
                             Spacer(modifier = Modifier.height(16.dp))
-                            // Row for all top buttons
                             Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
                                 Button(
                                     onClick = { if (isRecording) stopTuner() else requestPermissionAndStartTuner() },
@@ -200,14 +207,12 @@ class MainActivity : ComponentActivity() {
                                 ) {
                                     Text("Skin")
                                 }
-                                VisualizerToggleButton() // Button moved here
+                                VisualizerToggleButton()
                             }
                         }
                         Column(
                             horizontalAlignment = Alignment.CenterHorizontally,
-                            modifier = Modifier
-                                .align(Alignment.Center)
-                                .offset(y = (-15).dp)
+                            modifier = Modifier.align(Alignment.Center).offset(y = (-15).dp)
                         ) {
                             LedTuningStrip(activeLedIndex = activeLedIndex)
                             Image(
@@ -238,7 +243,6 @@ class MainActivity : ComponentActivity() {
                 }
             }
         }
-        activityScope.launch { while (isActiveTuner) { delay(16); val smoothing = 0.1f; smoothedAngle += (rotationAngle - smoothedAngle) * smoothing } }
     }
 
     private fun loadAd() {
@@ -257,7 +261,6 @@ class MainActivity : ComponentActivity() {
             })
             .withNativeAdOptions(NativeAdOptions.Builder().build())
             .build()
-
         adLoader.loadAd(AdRequest.Builder().build())
     }
 
@@ -270,14 +273,13 @@ class MainActivity : ComponentActivity() {
             .setMaxStreams(4)
             .setAudioAttributes(audioAttributes)
             .build()
-
         var loadedCount = 0
         val totalSounds = 4
         soundPool.setOnLoadCompleteListener { _, _, status ->
             if (status == 0) {
                 loadedCount++
                 if (loadedCount == totalSounds) {
-                    activityScope.launch {
+                    lifecycleScope.launch {
                         soundsLoaded = true
                         Log.d(TAG, "All sounds loaded successfully.")
                     }
@@ -286,28 +288,25 @@ class MainActivity : ComponentActivity() {
                 Log.e(TAG, "Error loading sound, status: $status")
             }
         }
-
-        Log.d(TAG, "Starting to load sounds asynchronously...")
         soundUp = soundPool.load(this, R.raw.up, 1)
         soundDown = soundPool.load(this, R.raw.down, 1)
         soundIntune = soundPool.load(this, R.raw.intune, 1)
         soundTick = soundPool.load(this, R.raw.metronome_tick, 1)
     }
 
-    override fun onStart() { super.onStart(); isActiveTuner = true }
-    override fun onStop() { super.onStop(); isActiveTuner = false; stopMetronome() }
+    override fun onStop() { super.onStop(); stopMetronome() }
 
     override fun onDestroy() {
         super.onDestroy()
         nativeAd?.destroy()
         soundPool.release()
-        activityScope.cancel()
+        dispatcher?.stop()
     }
 
     private fun requestPermissionAndStartTuner() {
         when {
             ContextCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED -> {
-                activityScope.launch { startTuner() }
+                lifecycleScope.launch { startTuner() }
             }
             else -> {
                 ActivityCompat.requestPermissions(this, arrayOf(Manifest.permission.RECORD_AUDIO), REQUEST_RECORD_AUDIO_PERMISSION)
@@ -320,7 +319,7 @@ class MainActivity : ComponentActivity() {
         super.onRequestPermissionsResult(requestCode, permissions, grantResults)
         if (requestCode == REQUEST_RECORD_AUDIO_PERMISSION) {
             if (grantResults.isNotEmpty() && grantResults[0] == PackageManager.PERMISSION_GRANTED) {
-                activityScope.launch { startTuner() }
+                lifecycleScope.launch { startTuner() }
             } else {
                 statusText = "Permission Denied"
                 statusColor = Color.Red
@@ -335,32 +334,23 @@ class MainActivity : ComponentActivity() {
             dispatcher = withContext(Dispatchers.IO) {
                 AudioDispatcherFactory.fromDefaultMicrophone(SAMPLE_RATE, AUDIO_BUFFER_SIZE, BUFFER_OVERLAP)
             }
-
             val pitchDetectionHandler = PitchDetectionHandler { result, _ ->
                 if(result.isPitched && result.probability > CONFIDENCE_THRESHOLD) {
-                    activityScope.launch { updatePitch(result.pitch) }
+                    lifecycleScope.launch { updatePitch(result.pitch) }
                 }
             }
             val pitchProcessor = PitchProcessor(PitchProcessor.PitchEstimationAlgorithm.YIN, SAMPLE_RATE.toFloat(), AUDIO_BUFFER_SIZE, pitchDetectionHandler)
 
-            // A combined processor for both FFT (Bars) and Waveform data
             val processingProcessor = object: AudioProcessor {
-                var fft = FFT(AUDIO_BUFFER_SIZE)
-                private val amplitudes = FloatArray(AUDIO_BUFFER_SIZE) // Use a full-size buffer for modulus
+                val fft = FFT(AUDIO_BUFFER_SIZE)
                 override fun process(audioEvent: AudioEvent): Boolean {
                     val audioBuffer = audioEvent.floatBuffer.clone()
-
-                    // Update UI from the main thread
-                    activityScope.launch {
-                        // 1. Handle magnitudes for BarsVisualizer
+                    lifecycleScope.launch {
                         val transformBuffer = audioBuffer.clone()
-                        fft.forwardTransform(transformBuffer)
-                        // Use a correctly-sized destination for modulus
                         val magnitudesDest = FloatArray(transformBuffer.size / 2)
+                        fft.forwardTransform(transformBuffer)
                         fft.modulus(transformBuffer, magnitudesDest)
                         magnitudes = magnitudesDest
-
-                        // 2. Add new data to scrolling buffer and trim it
                         val newList = scrollingWaveformData.toMutableList()
                         newList.addAll(audioBuffer.toList())
                         while (newList.size > SCROLLING_WAVEFORM_MAX_SIZE) {
@@ -404,11 +394,11 @@ class MainActivity : ComponentActivity() {
         statusText = "Press Start to Tune"
         statusColor = Color.White
         magnitudes = floatArrayOf()
-        // Clear the scrolling buffer
         scrollingWaveformData = emptyList()
     }
 
     private fun updatePitch(pitch: Float) {
+        if (!isRecording) return
         pitchBuffer.add(pitch)
         if (pitchBuffer.size < PITCH_BUFFER_SIZE) return
         val stablePitch = pitchBuffer.sorted()[PITCH_BUFFER_SIZE / 2]
@@ -434,13 +424,12 @@ class MainActivity : ComponentActivity() {
                 inTuneSoundPlayed = false
                 if(cents < 0) {
                     statusText = "$noteName (Tune Up)"
-                    statusColor = Color(0xFFFFA000)
                     playFeedbackSound(soundUp)
                 } else {
                     statusText = "$noteName (Tune Down)"
-                    statusColor = Color(0xFFFFA000)
                     playFeedbackSound(soundDown)
                 }
+                statusColor = Color(0xFFFFA000)
             }
         }
     }
@@ -449,7 +438,7 @@ class MainActivity : ComponentActivity() {
         if (!soundsLoaded) return
         val now = System.currentTimeMillis()
         val cooldown = if(soundId == soundIntune) 0 else 1500
-        if (voiceModeEnabled && isActiveTuner && now - lastFeedbackTime > cooldown) {
+        if (voiceModeEnabled && isRecording && now - lastFeedbackTime > cooldown) {
             if (soundId != 0) {
                 soundPool.play(soundId, 1f, 1f, 1, 0, 1f)
                 lastFeedbackTime = now
@@ -460,7 +449,7 @@ class MainActivity : ComponentActivity() {
     private fun startMetronome() {
         if(isMetronomeRunning || !soundsLoaded) return
         isMetronomeRunning = true
-        metronomeJob = activityScope.launch(Dispatchers.Default) {
+        metronomeJob = lifecycleScope.launch(Dispatchers.Default) {
             while(isActive) {
                 withContext(Dispatchers.Main) {
                     soundPool.play(soundTick, 1f, 1f, 0, 0, 1f)
@@ -478,7 +467,15 @@ class MainActivity : ComponentActivity() {
 
     private fun getNearestNoteFrequency(pitch: Float): Pair<Float, String>? = noteFrequencies.minByOrNull { abs(pitch - it.first) }
 
+    // --- BUG FIX: CRASH-PROOF SKIN CHANGE ---
+    // This function now safely stops the tuner before changing skins and restarts it after,
+    // preventing the race condition crash you identified.
     private fun randomizeSkins() {
+        val wasRecording = isRecording
+        if (wasRecording) {
+            stopTuner()
+        }
+
         val newPedal = pedalImages.random()
         val newVdu = vduImages.random()
         selectedPedal = newPedal
@@ -488,63 +485,39 @@ class MainActivity : ComponentActivity() {
             putInt(PREF_PEDAL_SKIN, newPedal)
             putInt(PREF_VDU_SKIN, newVdu)
         }
+
+        if (wasRecording) {
+            // Restart the tuner after a brief delay to ensure the UI has settled.
+            lifecycleScope.launch {
+                delay(100) // Small delay to prevent issues
+                startTuner()
+            }
+        }
     }
+    // --- END BUG FIX ---
 
     @Composable
     fun BottomControls() {
         Column(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(16.dp),
+            modifier = Modifier.fillMaxWidth().padding(16.dp),
             horizontalAlignment = Alignment.CenterHorizontally
         ) {
-            // Visualizer display moved here
             VisualizerDisplay()
             Spacer(modifier = Modifier.height(16.dp))
-
-            // Combined Note, Frequency, and Status into one Row
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.SpaceEvenly,
                 verticalAlignment = Alignment.CenterVertically
             ) {
-                Text(
-                    text = "Note: $detectedNote",
-                    color = Color.White,
-                    fontSize = 18.sp,
-                    fontWeight = FontWeight.Bold,
-                    style = LocalTextStyle.current.copy(shadow = Shadow(Color.Black, blurRadius = 8f)),
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis
-                )
-                Text(
-                    text = frequencyText,
-                    fontSize = 14.sp,
-                    color = Color.LightGray,
-                    style = LocalTextStyle.current.copy(shadow = Shadow(Color.Black, blurRadius = 6f)),
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis
-                )
-                Text(
-                    text = statusText,
-                    fontSize = 16.sp,
-                    color = statusColor,
-                    style = LocalTextStyle.current.copy(shadow = Shadow(Color.Black, blurRadius = 8f)),
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis
-                )
+                Text(text = "Note: $detectedNote", color = Color.White, fontSize = 18.sp, fontWeight = FontWeight.Bold, style = LocalTextStyle.current.copy(shadow = Shadow(Color.Black, blurRadius = 8f)), maxLines = 1, overflow = TextOverflow.Ellipsis)
+                Text(text = frequencyText, fontSize = 14.sp, color = Color.LightGray, style = LocalTextStyle.current.copy(shadow = Shadow(Color.Black, blurRadius = 6f)), maxLines = 1, overflow = TextOverflow.Ellipsis)
+                Text(text = statusText, fontSize = 16.sp, color = statusColor, style = LocalTextStyle.current.copy(shadow = Shadow(Color.Black, blurRadius = 8f)), maxLines = 1, overflow = TextOverflow.Ellipsis)
             }
             Spacer(modifier = Modifier.height(16.dp))
-
-            // Add the Native Ad here, at the bottom of the BottomControls column
-            val ad = nativeAd
-            if (ad != null) {
+            nativeAd?.let { ad ->
                 AnimatedVisibility(
                     visible = isAdVisible,
-                    enter = slideInVertically(
-                        initialOffsetY = { it / 2 },
-                        animationSpec = tween(durationMillis = 500)
-                    ) + fadeIn(animationSpec = tween(durationMillis = 500))
+                    enter = slideInVertically(initialOffsetY = { it / 2 }, animationSpec = tween(durationMillis = 500)) + fadeIn(animationSpec = tween(durationMillis = 500))
                 ) {
                     NativeAdView(ad = ad)
                 }
@@ -559,50 +532,36 @@ class MainActivity : ComponentActivity() {
                 IconButton(onClick={if(tempo>40)tempo--}, enabled=enabled){Icon(Icons.Default.KeyboardArrowLeft,"",tint=Color.White)}
                 Text("$tempo BPM",color=Color.White,fontWeight=FontWeight.SemiBold,fontSize=14.sp,modifier=Modifier.width(80.dp),textAlign=TextAlign.Center)
                 IconButton(onClick={if(tempo<240)tempo++}, enabled=enabled){Icon(Icons.Default.KeyboardArrowRight,"",tint=Color.White)}
-                Spacer(Modifier.width(4.dp))
-                Divider(modifier=Modifier.height(24.dp).width(1.dp),color=Color.Gray)
-                Spacer(Modifier.width(4.dp))
+                Spacer(Modifier.width(4.dp)); Divider(modifier=Modifier.height(24.dp).width(1.dp),color=Color.Gray); Spacer(Modifier.width(4.dp))
                 IconButton(onClick={timeSignatureIndex=(timeSignatureIndex-1+timeSignatures.size)%timeSignatures.size}, enabled=enabled){Icon(Icons.Default.KeyboardArrowLeft,"",tint=Color.White)}
                 Text(timeSignatures[timeSignatureIndex],color=Color.White,fontWeight=FontWeight.SemiBold,fontSize=14.sp,modifier=Modifier.width(40.dp),textAlign=TextAlign.Center)
                 IconButton(onClick={timeSignatureIndex=(timeSignatureIndex+1)%timeSignatures.size}, enabled=enabled){Icon(Icons.Default.KeyboardArrowRight,"",tint=Color.White)}
                 Spacer(modifier=Modifier.width(8.dp))
-                Button(onClick={if(isMetronomeRunning)stopMetronome()else startMetronome()}, enabled=enabled, modifier=Modifier.fillMaxHeight(0.75f),contentPadding=PaddingValues(horizontal=10.dp),colors=ButtonDefaults.buttonColors(containerColor=if(isMetronomeRunning)Color(0xFFE53935)else Color(0xFF43A047))){
-                    // Text removed as requested
-                }
+                Button(onClick={if(isMetronomeRunning)stopMetronome()else startMetronome()}, enabled=enabled, modifier=Modifier.fillMaxHeight(0.75f),contentPadding=PaddingValues(horizontal=10.dp),colors=ButtonDefaults.buttonColors(containerColor=if(isMetronomeRunning)Color(0xFFE53935)else Color(0xFF43A047))){}
             }
         }
     }
 
-    // This composable is now just the button
     @Composable
     fun VisualizerToggleButton() {
         Button(onClick={
-            val allModes=VisualizerMode.entries
-            val currentIndex=allModes.indexOf(visualizerMode)
-            val nextIndex=(currentIndex+1)%allModes.size
-            visualizerMode=allModes[nextIndex]
+            val allModes=VisualizerMode.values()
+            visualizerMode = allModes[(allModes.indexOf(visualizerMode) + 1) % allModes.size]
         }, colors = ButtonDefaults.buttonColors(containerColor = Color.Black, contentColor = Color.White))
         {
-            // Shorten "Waveform" to "Wave" to prevent UI breaking
-            val vizName = if (visualizerMode == VisualizerMode.WAVEFORM) {
-                "Wave"
-            } else {
-                visualizerMode.name.replace('_',' ').lowercase().replaceFirstChar{if(it.isLowerCase())it.titlecase()else it.toString()}
+            val vizName = when(visualizerMode) {
+                VisualizerMode.WAVEFORM -> "Wave"
+                VisualizerMode.BARS -> "Bars"
+                VisualizerMode.NONE -> "Off"
             }
             Text("Visualizer: $vizName")
         }
     }
 
-    // This new composable is just the display part
     @Composable
     fun VisualizerDisplay() {
         Box(
-            modifier = Modifier
-                .fillMaxWidth(0.9f)
-                .height(80.dp)
-                .background(Color.Black.copy(alpha = 0.6f), RoundedCornerShape(8.dp))
-                .clip(RoundedCornerShape(8.dp))
-                .padding(8.dp),
+            modifier = Modifier.fillMaxWidth(0.9f).height(80.dp).background(Color.Black.copy(alpha = 0.6f), RoundedCornerShape(8.dp)).clip(RoundedCornerShape(8.dp)).padding(8.dp),
             contentAlignment = Alignment.Center
         ){
             when(visualizerMode){
@@ -613,33 +572,21 @@ class MainActivity : ComponentActivity() {
         }
     }
 
-
     @Composable
     fun BarsVisualizer(modifier: Modifier = Modifier, magnitudes: FloatArray) {
         Canvas(modifier = modifier) {
             if (magnitudes.isNotEmpty()) {
-                val barCount = 64 // Use a fixed number of bars for a "fatter" look
+                val barCount = 64
                 if (barCount == 0) return@Canvas
                 val barWidth = size.width / barCount
-                val barSpacing = 1.dp.toPx() // A thin 1dp separator between bars
-
+                val barSpacing = 1.dp.toPx()
                 val relevantMagnitudes = magnitudes.take(barCount)
-                // Use a higher coerceAtLeast to prevent small noises from maxing out the visualizer
                 val maxMagnitude = (relevantMagnitudes.maxOrNull() ?: 1f).coerceAtLeast(1.0f)
-
                 relevantMagnitudes.forEachIndexed { index, mag ->
                     val normalizedHeight = (mag / maxMagnitude).coerceIn(0f, 1f)
                     val barHeight = normalizedHeight * size.height
                     val color = lerp(Color.Green, Color.Red, normalizedHeight)
-
-                    drawRect(
-                        color = color,
-                        topLeft = Offset(
-                            x = index * barWidth,
-                            y = size.height - barHeight
-                        ),
-                        size = Size(width = (barWidth - barSpacing).coerceAtLeast(0f), height = barHeight)
-                    )
+                    drawRect(color = color, topLeft = Offset(x = index * barWidth, y = size.height - barHeight), size = Size(width = (barWidth - barSpacing).coerceAtLeast(0f), height = barHeight))
                 }
             }
         }
@@ -648,62 +595,31 @@ class MainActivity : ComponentActivity() {
     @Composable
     fun WaveformVisualizer(modifier: Modifier = Modifier, fullData: List<Float>) {
         Canvas(modifier = modifier) {
-            // How many data points to show on screen at once. A higher number is more detailed.
             val samplesToDisplay = 4096
             if (fullData.isEmpty()) return@Canvas
-
-            // Take only the last 'n' samples from our buffer to create the scrolling effect.
             val waveformSlice = fullData.takeLast(samplesToDisplay)
-
-            // If our buffer is not yet full, pad the start with zeros (silence). This
-            // makes the waveform appear to scroll in from the right edge of the screen.
-            val displayData = if (waveformSlice.size < samplesToDisplay) {
-                List(samplesToDisplay - waveformSlice.size) { 0f } + waveformSlice
-            } else {
-                waveformSlice
-            }
-
+            val displayData = if (waveformSlice.size < samplesToDisplay) { List(samplesToDisplay - waveformSlice.size) { 0f } + waveformSlice } else { waveformSlice }
             val stepX = size.width / displayData.size
             val centerY = size.height / 2f
             val waveColor = Color(0xFF4CAF50)
             val centerLineColor = Color.Black.copy(alpha = 0.3f)
-
             val topPath = Path().apply {
                 moveTo(0f, centerY)
-                displayData.forEachIndexed { index, value ->
-                    lineTo(index * stepX, centerY - (value.coerceAtLeast(0f) * centerY))
-                }
-                lineTo(size.width, centerY)
-                close()
+                displayData.forEachIndexed { index, value -> lineTo(index * stepX, centerY - (value.coerceAtLeast(0f) * centerY)) }
+                lineTo(size.width, centerY); close()
             }
-
             val bottomPath = Path().apply {
                 moveTo(0f, centerY)
-                displayData.forEachIndexed { index, value ->
-                    lineTo(index * stepX, centerY - (value.coerceAtMost(0f) * centerY))
-                }
-                lineTo(size.width, centerY)
-                close()
+                displayData.forEachIndexed { index, value -> lineTo(index * stepX, centerY - (value.coerceAtMost(0f) * centerY)) }
+                lineTo(size.width, centerY); close()
             }
-
-            drawPath(path = topPath, color = waveColor)
-            drawPath(path = bottomPath, color = waveColor)
-
-            drawLine(
-                color = centerLineColor,
-                start = Offset(0f, centerY),
-                end = Offset(size.width, centerY),
-                strokeWidth = 1.dp.toPx()
-            )
+            drawPath(path = topPath, color = waveColor); drawPath(path = bottomPath, color = waveColor)
+            drawLine(color = centerLineColor, start = Offset(0f, centerY), end = Offset(size.width, centerY), strokeWidth = 1.dp.toPx())
         }
     }
 
     @Composable fun LedTuningStrip(activeLedIndex:Int){Row(modifier=Modifier.shadow(elevation=8.dp,shape=RoundedCornerShape(6.dp),spotColor=Color.Green),horizontalArrangement=Arrangement.Center,verticalAlignment=Alignment.CenterVertically){(-5..5).forEach{index->
-        val isActive = when {
-            activeLedIndex < 0 -> index in activeLedIndex until 0
-            activeLedIndex > 0 -> index in 1..activeLedIndex
-            else -> index == 0
-        }
+        val isActive = when { activeLedIndex < 0 -> index in activeLedIndex until 0; activeLedIndex > 0 -> index in 1..activeLedIndex; else -> index == 0 }
         val color=when{index==0->Color(0xFF00C853);abs(index)in 1..2->Color(0xFFFFFF00);else->Color(0xFFD50000)};LedIndicator(isActive=isActive,activeColor=color);if(index<5){Spacer(modifier=Modifier.width(2.dp))}}}}
     @Composable fun LedIndicator(isActive:Boolean,activeColor:Color){val color=if(isActive)activeColor else Color.DarkGray.copy(alpha=0.5f);Box(modifier=Modifier.size(width=20.dp,height=24.dp).background(color,shape=RoundedCornerShape(4.dp)).border(width=1.dp,color=Color.Black.copy(alpha=0.3f),shape=RoundedCornerShape(4.dp)))}
 }
@@ -711,25 +627,17 @@ class MainActivity : ComponentActivity() {
 @Composable
 fun NativeAdView(ad: NativeAd) {
     AndroidView(
-        modifier = Modifier
-            .fillMaxWidth()
-            .padding(vertical = 8.dp),
-        factory = { context ->
-            val adView = LayoutInflater.from(context)
-                .inflate(R.layout.ad_unified, null) as NativeAdView
-            adView
-        },
+        modifier = Modifier.fillMaxWidth().padding(vertical = 8.dp),
+        factory = { context -> LayoutInflater.from(context).inflate(R.layout.ad_unified, null) as NativeAdView },
         update = { adView ->
             adView.headlineView = adView.findViewById(R.id.ad_headline)
             adView.bodyView = adView.findViewById(R.id.ad_body)
             adView.callToActionView = adView.findViewById(R.id.ad_call_to_action)
             adView.iconView = adView.findViewById(R.id.ad_app_icon)
-
             (adView.headlineView as? TextView)?.text = ad.headline
             (adView.bodyView as? TextView)?.text = ad.body
             (adView.callToActionView as? Button)?.text = ad.callToAction
             (adView.iconView as? ImageView)?.setImageDrawable(ad.icon?.drawable)
-
             adView.setNativeAd(ad)
         }
     )
