@@ -1,5 +1,3 @@
-// build.gradle.kts (Module :app)
-
 plugins {
     id("com.android.application")
     id("org.jetbrains.kotlin.android")
@@ -14,7 +12,7 @@ android {
         applicationId = "co.uk.doverguitarteacher.voiceguitartuner" // Your package name
         minSdk = 24 // Or your project's minSdk
         targetSdk = 35 // Or your project's targetSdk
-        versionCode = 10
+        versionCode = 11
         versionName = "1"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
