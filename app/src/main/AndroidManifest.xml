@@ -3,6 +3,7 @@
     xmlns:tools="http://schemas.android.com/tools">
 
     <!-- Permissions for internet, network state, and microphone -->
+    <uses-permission android:name="com.android.vending.BILLING" />
     <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
     <uses-permission android:name="android.permission.RECORD_AUDIO" />
