@@ -718,7 +718,9 @@ class MainActivity : ComponentActivity() {
     @Composable
     fun BottomControls() {
         Column(
-            modifier = Modifier.fillMaxWidth().padding(16.dp),
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(16.dp),
             horizontalAlignment = Alignment.CenterHorizontally
         ) {
             VisualizerDisplay()
@@ -757,7 +759,7 @@ class MainActivity : ComponentActivity() {
             Spacer(modifier = Modifier.height(16.dp))
             nativeAd?.let { ad ->
                 AnimatedVisibility(
-                    visible = isAdVisible,
+                    visible = isAdVisible && !isAdFree,
                     enter = slideInVertically(initialOffsetY = { it / 2 }, animationSpec = tween(durationMillis = 500)) + fadeIn(animationSpec = tween(durationMillis = 500))
                 ) {
                     NativeAdView(ad = ad)
