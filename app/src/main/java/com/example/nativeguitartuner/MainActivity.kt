@@ -28,10 +28,10 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.KeyboardArrowLeft
-import androidx.compose.material.icons.filled.KeyboardArrowRight
-import androidx.compose.material.icons.filled.VolumeOff
-import androidx.compose.material.icons.filled.VolumeUp
+import androidx.compose.material.icons.automirrored.filled.KeyboardArrowLeft
+import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
+import androidx.compose.material.icons.automirrored.filled.VolumeOff
+import androidx.compose.material.icons.automirrored.filled.VolumeUp
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
@@ -41,6 +41,10 @@ import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.*
+import androidx.compose.ui.graphics.drawscope.DrawScope
+import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.graphics.lerp
+import androidx.compose.ui.graphics.TransformOrigin
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
@@ -61,6 +65,19 @@ import be.tarsos.dsp.io.android.AudioDispatcherFactory
 import be.tarsos.dsp.pitch.PitchDetectionHandler
 import be.tarsos.dsp.pitch.PitchProcessor
 import be.tarsos.dsp.util.fft.FFT
+import com.android.billingclient.api.AcknowledgePurchaseParams
+import com.android.billingclient.api.BillingClient
+import com.android.billingclient.api.BillingClientStateListener
+import com.android.billingclient.api.BillingFlowParams
+import com.android.billingclient.api.BillingResult
+import com.android.billingclient.api.PendingPurchasesParams
+import com.android.billingclient.api.ProductDetails
+import com.android.billingclient.api.ProductDetailsResponseListener
+import com.android.billingclient.api.Purchase
+import com.android.billingclient.api.PurchasesUpdatedListener
+import com.android.billingclient.api.QueryProductDetailsParams
+import com.android.billingclient.api.QueryProductDetailsResult
+import com.android.billingclient.api.QueryPurchasesParams
 import com.google.android.gms.ads.*
 import com.google.android.gms.ads.nativead.NativeAd
 import com.google.android.gms.ads.nativead.NativeAdOptions
@@ -90,6 +107,8 @@ class MainActivity : ComponentActivity() {
         private const val PREF_PEDAL_SKIN = "pedal_skin"
         private const val PREF_VDU_SKIN = "vdu_skin"
         private const val SCROLLING_WAVEFORM_MAX_SIZE = 16384
+        private const val PRODUCT_ID = "1" // Replace with your real one-time product id from Play Console
+        private const val PREF_AD_FREE = "pref_ad_free"
     }
 
     private var nativeAd by mutableStateOf<NativeAd?>(null)
@@ -126,15 +145,25 @@ class MainActivity : ComponentActivity() {
     private lateinit var vduImages: List<Int>
     private lateinit var timeSignatures: List<String>
     private lateinit var noteFrequencies: List<Pair<Float, String>>
+    private var isAdFree by mutableStateOf(false)
+
+    private lateinit var billingClient: BillingClient
+    private var adRemovalProductDetails: ProductDetails? = null
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
 
+        val prefs = getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        isAdFree = prefs.getBoolean(PREF_AD_FREE, false)
+
+        setupBillingClient()
+
         MobileAds.initialize(this) {}
-        loadAd()
+        if (!isAdFree) {
+            loadAd()
+        }
 
         // --- BUG FIX 1: BULLETPROOF SKIN LOADING ---
-        val prefs = getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
         try {
             val loadedPedalId = prefs.getInt(PREF_PEDAL_SKIN, R.drawable.dovercastle1)
             val loadedVduId = prefs.getInt(PREF_VDU_SKIN, R.drawable.dial)
@@ -187,29 +216,63 @@ class MainActivity : ComponentActivity() {
             MaterialTheme {
                 Surface(modifier = Modifier.fillMaxSize()) {
                     Box(modifier = Modifier.fillMaxSize()) {
-                        Image(painter = painterResource(id = selectedPedal), contentDescription = null, modifier = Modifier.fillMaxSize())
+                        Image(
+                            painter = painterResource(id = selectedPedal),
+                            contentDescription = null,
+                            modifier = Modifier.fillMaxSize()
+                        )
+
+                        // ===== Top-center controls with a small black " remove ads " button =====
                         Column(
-                            modifier = Modifier.align(Alignment.TopCenter).padding(top = 24.dp),
+                            modifier = Modifier
+                                .align(Alignment.TopCenter)
+                                .padding(top = 16.dp),
                             horizontalAlignment = Alignment.CenterHorizontally
                         ) {
+                            // Keep your existing controls if you like; "remove ads" is centered and small.
+                            if (!isAdFree) {
+                                Button(
+                                    onClick = { launchPurchaseFlow() },
+                                    enabled = adRemovalProductDetails != null,
+                                    colors = ButtonDefaults.buttonColors(
+                                        containerColor = Color.Black,
+                                        contentColor = Color.White
+                                    ),
+                                    contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp),
+                                    shape = RoundedCornerShape(6.dp)
+                                ) {
+                                    Text(" remove ads ", fontSize = 12.sp)
+                                }
+                                Spacer(Modifier.height(8.dp))
+                            }
+
+                            // Your original top row:
                             MetronomeControls(enabled = soundsLoaded)
                             Spacer(modifier = Modifier.height(16.dp))
-                            Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
+                            Row(
+                                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
                                 Button(
                                     onClick = { if (isRecording) stopTuner() else requestPermissionAndStartTuner() },
-                                    colors = ButtonDefaults.buttonColors(containerColor = Color.Black, contentColor = Color.White)
-                                ) {
-                                    Text(if (isRecording) "Stop" else "Start")
-                                }
+                                    colors = ButtonDefaults.buttonColors(
+                                        containerColor = Color.Black,
+                                        contentColor = Color.White
+                                    )
+                                ) { Text(if (isRecording) "Stop" else "Start") }
+
                                 Button(
                                     onClick = { randomizeSkins() },
-                                    colors = ButtonDefaults.buttonColors(containerColor = Color.Black, contentColor = Color.White)
-                                ) {
-                                    Text("Skin")
-                                }
+                                    colors = ButtonDefaults.buttonColors(
+                                        containerColor = Color.Black,
+                                        contentColor = Color.White
+                                    )
+                                ) { Text("Skin") }
+
                                 VisualizerToggleButton()
                             }
                         }
+
                         Column(
                             horizontalAlignment = Alignment.CenterHorizontally,
                             modifier = Modifier.align(Alignment.Center).offset(y = (-15).dp)
@@ -221,21 +284,31 @@ class MainActivity : ComponentActivity() {
                                 modifier = Modifier.size(240.dp)
                             )
                         }
-                        Image(painter = painterResource(id = R.drawable.needle), contentDescription = null, modifier = Modifier
-                            .size(140.dp)
-                            .align(Alignment.Center)
-                            .offset(y = (-15).dp)
-                            .graphicsLayer {
-                                rotationZ = smoothedAngle; transformOrigin = TransformOrigin(0.5f, 0.84f)
-                            })
-                        Icon(imageVector = if (voiceModeEnabled) Icons.Default.VolumeUp else Icons.Default.VolumeOff, contentDescription = "Toggle Voice Feedback", tint = if (voiceModeEnabled) Color.Green else Color.Red,
+
+                        Image(
+                            painter = painterResource(id = R.drawable.needle),
+                            contentDescription = null,
+                            modifier = Modifier
+                                .size(140.dp)
+                                .align(Alignment.Center)
+                                .offset(y = (-15).dp)
+                                .graphicsLayer {
+                                    rotationZ = smoothedAngle
+                                    transformOrigin = TransformOrigin(0.5f, 0.84f)
+                                }
+                        )
+
+                        Icon(
+                            imageVector = if (voiceModeEnabled) Icons.AutoMirrored.Filled.VolumeUp else Icons.AutoMirrored.Filled.VolumeOff,
+                            contentDescription = "Toggle Voice Feedback",
+                            tint = if (voiceModeEnabled) Color.Green else Color.Red,
                             modifier = Modifier
                                 .padding(12.dp)
                                 .size(28.dp)
                                 .align(Alignment.TopStart)
-                                .clickable {
-                                    if (soundsLoaded) voiceModeEnabled = !voiceModeEnabled
-                                })
+                                .clickable { if (soundsLoaded) voiceModeEnabled = !voiceModeEnabled }
+                        )
+
                         Box(modifier = Modifier.align(Alignment.BottomCenter)) {
                             BottomControls()
                         }
@@ -246,6 +319,7 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun loadAd() {
+        if (isAdFree) return
         val adUnitId = getString(R.string.native_ad_unit_id)
         val adLoader = AdLoader.Builder(this, adUnitId)
             .forNativeAd { ad: NativeAd ->
@@ -262,6 +336,154 @@ class MainActivity : ComponentActivity() {
             .withNativeAdOptions(NativeAdOptions.Builder().build())
             .build()
         adLoader.loadAd(AdRequest.Builder().build())
+    }
+
+    private fun setupBillingClient() {
+        val purchasesUpdatedListener =
+            PurchasesUpdatedListener { billingResult, purchases ->
+                if (billingResult.responseCode == BillingClient.BillingResponseCode.OK && purchases != null) {
+                    for (purchase in purchases) {
+                        handlePurchase(purchase)
+                    }
+                } else if (billingResult.responseCode == BillingClient.BillingResponseCode.USER_CANCELED) {
+                    Log.d(TAG, "User canceled the purchase.")
+                } else {
+                    Log.e(TAG, "Billing error: ${billingResult.debugMessage}")
+                }
+            }
+
+        // IMPORTANT for PBL 8: enablePendingPurchases(PendingPurchasesParams(...))
+        billingClient = BillingClient.newBuilder(this)
+            .enablePendingPurchases(
+                PendingPurchasesParams.newBuilder()
+                    .enableOneTimeProducts()
+                    .build()
+            )
+            .enableAutoServiceReconnection() // optional but reduces manual reconnect code in PBL 8
+            .setListener(purchasesUpdatedListener)
+            .build()
+
+        billingClient.startConnection(object : BillingClientStateListener {
+            override fun onBillingSetupFinished(billingResult: BillingResult) {
+                if (billingResult.responseCode == BillingClient.BillingResponseCode.OK) {
+                    Log.d(TAG, "Billing Client Connected")
+                    queryProductDetails()
+                    queryPurchases()
+                } else {
+                    Log.e(TAG, "Billing Client connection failure: ${billingResult.debugMessage}")
+                }
+            }
+            override fun onBillingServiceDisconnected() {
+                Log.d(TAG, "Billing Client Disconnected")
+            }
+        })
+    }
+
+    private fun queryProductDetails() {
+        val productList = listOf(
+            QueryProductDetailsParams.Product.newBuilder()
+                .setProductId(PRODUCT_ID)
+                .setProductType(BillingClient.ProductType.INAPP)
+                .build()
+        )
+
+        val params = QueryProductDetailsParams.newBuilder()
+            .setProductList(productList)
+            .build()
+
+        // PBL 8: ProductDetailsResponseListener returns QueryProductDetailsResult
+        billingClient.queryProductDetailsAsync(
+            params,
+            ProductDetailsResponseListener { billingResult: BillingResult, result: QueryProductDetailsResult ->
+                if (billingResult.responseCode == BillingClient.BillingResponseCode.OK) {
+                    val list = result.productDetailsList
+                    if (!list.isNullOrEmpty()) {
+                        adRemovalProductDetails = list.firstOrNull()
+                        Log.d(TAG, "Product details queried: ${adRemovalProductDetails?.name}")
+                    } else {
+                        val unfetched = result.unfetchedProductList
+                        Log.e(TAG, "No ProductDetails returned. Unfetched: $unfetched")
+                    }
+                } else {
+                    Log.e(TAG, "Failed to query product details: ${billingResult.debugMessage}")
+                }
+            }
+        )
+    }
+
+    private fun launchPurchaseFlow() {
+        adRemovalProductDetails?.let { productDetails ->
+            val productDetailsParamsList = listOf(
+                BillingFlowParams.ProductDetailsParams.newBuilder()
+                    .setProductDetails(productDetails)
+                    .build()
+            )
+            val billingFlowParams = BillingFlowParams.newBuilder()
+                .setProductDetailsParamsList(productDetailsParamsList)
+                .build()
+            billingClient.launchBillingFlow(this, billingFlowParams)
+        } ?: run {
+            Toast.makeText(this, "Unable to start purchase. Please try again later.", Toast.LENGTH_SHORT).show()
+            Log.e(TAG, "Ad removal product details not found.")
+        }
+    }
+
+    private fun handlePurchase(purchase: Purchase) {
+        when (purchase.purchaseState) {
+            Purchase.PurchaseState.PURCHASED -> {
+                if (!purchase.isAcknowledged) {
+                    val acknowledgePurchaseParams = AcknowledgePurchaseParams.newBuilder()
+                        .setPurchaseToken(purchase.purchaseToken)
+                        .build()
+                    billingClient.acknowledgePurchase(acknowledgePurchaseParams) { billingResult ->
+                        if (billingResult.responseCode == BillingClient.BillingResponseCode.OK) {
+                            grantAdFreeAccess()
+                        } else {
+                            Log.e(TAG, "Error acknowledging purchase: ${billingResult.debugMessage}")
+                        }
+                    }
+                } else {
+                    grantAdFreeAccess()
+                }
+            }
+            Purchase.PurchaseState.PENDING -> {
+                // Do not grant entitlement yet
+                Toast.makeText(this, "Purchase pending... we'll unlock ad-free when it completes.", Toast.LENGTH_LONG).show()
+                Log.d(TAG, "Purchase is pending.")
+            }
+            Purchase.PurchaseState.UNSPECIFIED_STATE -> {
+                Log.w(TAG, "Purchase state UNSPECIFIED_STATE")
+            }
+        }
+    }
+
+    private fun queryPurchases() {
+        val params = QueryPurchasesParams.newBuilder()
+            .setProductType(BillingClient.ProductType.INAPP)
+
+        billingClient.queryPurchasesAsync(params.build()) { billingResult, purchases ->
+            if (billingResult.responseCode == BillingClient.BillingResponseCode.OK && purchases.isNotEmpty()) {
+                for (purchase in purchases) {
+                    if (purchase.products.contains(PRODUCT_ID) && purchase.purchaseState == Purchase.PurchaseState.PURCHASED) {
+                        grantAdFreeAccess()
+                        break
+                    }
+                }
+            }
+        }
+    }
+
+    private fun grantAdFreeAccess() {
+        lifecycleScope.launch {
+            isAdFree = true
+            getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE).edit {
+                putBoolean(PREF_AD_FREE, true)
+            }
+            nativeAd?.destroy()
+            nativeAd = null
+            isAdVisible = false
+            Toast.makeText(applicationContext, "Ads removed!", Toast.LENGTH_SHORT).show()
+        }
     }
 
     private fun setupSoundPool() {
@@ -465,11 +687,10 @@ class MainActivity : ComponentActivity() {
         isMetronomeRunning = false
     }
 
-    private fun getNearestNoteFrequency(pitch: Float): Pair<Float, String>? = noteFrequencies.minByOrNull { abs(pitch - it.first) }
+    private fun getNearestNoteFrequency(pitch: Float): Pair<Float, String>? =
+        noteFrequencies.minByOrNull { abs(pitch - it.first) }
 
-    // --- BUG FIX: CRASH-PROOF SKIN CHANGE ---
-    // This function now safely stops the tuner before changing skins and restarts it after,
-    // preventing the race condition crash you identified.
+    // --- Crash-proof skin change ---
     private fun randomizeSkins() {
         val wasRecording = isRecording
         if (wasRecording) {
@@ -487,14 +708,12 @@ class MainActivity : ComponentActivity() {
         }
 
         if (wasRecording) {
-            // Restart the tuner after a brief delay to ensure the UI has settled.
             lifecycleScope.launch {
-                delay(100) // Small delay to prevent issues
+                delay(100)
                 startTuner()
             }
         }
     }
-    // --- END BUG FIX ---
 
     @Composable
     fun BottomControls() {
@@ -509,9 +728,31 @@ class MainActivity : ComponentActivity() {
                 horizontalArrangement = Arrangement.SpaceEvenly,
                 verticalAlignment = Alignment.CenterVertically
             ) {
-                Text(text = "Note: $detectedNote", color = Color.White, fontSize = 18.sp, fontWeight = FontWeight.Bold, style = LocalTextStyle.current.copy(shadow = Shadow(Color.Black, blurRadius = 8f)), maxLines = 1, overflow = TextOverflow.Ellipsis)
-                Text(text = frequencyText, fontSize = 14.sp, color = Color.LightGray, style = LocalTextStyle.current.copy(shadow = Shadow(Color.Black, blurRadius = 6f)), maxLines = 1, overflow = TextOverflow.Ellipsis)
-                Text(text = statusText, fontSize = 16.sp, color = statusColor, style = LocalTextStyle.current.copy(shadow = Shadow(Color.Black, blurRadius = 8f)), maxLines = 1, overflow = TextOverflow.Ellipsis)
+                Text(
+                    text = "Note: $detectedNote",
+                    color = Color.White,
+                    fontSize = 18.sp,
+                    fontWeight = FontWeight.Bold,
+                    style = LocalTextStyle.current.copy(shadow = Shadow(Color.Black, blurRadius = 8f)),
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
+                )
+                Text(
+                    text = frequencyText,
+                    fontSize = 14.sp,
+                    color = Color.LightGray,
+                    style = LocalTextStyle.current.copy(shadow = Shadow(Color.Black, blurRadius = 6f)),
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
+                )
+                Text(
+                    text = statusText,
+                    fontSize = 16.sp,
+                    color = statusColor,
+                    style = LocalTextStyle.current.copy(shadow = Shadow(Color.Black, blurRadius = 8f)),
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
+                )
             }
             Spacer(modifier = Modifier.height(16.dp))
             nativeAd?.let { ad ->
@@ -527,28 +768,70 @@ class MainActivity : ComponentActivity() {
 
     @Composable
     fun MetronomeControls(enabled: Boolean) {
-        Surface(shape=RoundedCornerShape(12.dp),color=Color.Black.copy(alpha=0.7f),border=BorderStroke(1.dp,Color.Gray.copy(alpha=0.5f))){
-            Row(modifier=Modifier.height(48.dp).padding(horizontal=8.dp),horizontalArrangement=Arrangement.Center,verticalAlignment=Alignment.CenterVertically){
-                IconButton(onClick={if(tempo>40)tempo--}, enabled=enabled){Icon(Icons.Default.KeyboardArrowLeft,"",tint=Color.White)}
-                Text("$tempo BPM",color=Color.White,fontWeight=FontWeight.SemiBold,fontSize=14.sp,modifier=Modifier.width(80.dp),textAlign=TextAlign.Center)
-                IconButton(onClick={if(tempo<240)tempo++}, enabled=enabled){Icon(Icons.Default.KeyboardArrowRight,"",tint=Color.White)}
-                Spacer(Modifier.width(4.dp)); Divider(modifier=Modifier.height(24.dp).width(1.dp),color=Color.Gray); Spacer(Modifier.width(4.dp))
-                IconButton(onClick={timeSignatureIndex=(timeSignatureIndex-1+timeSignatures.size)%timeSignatures.size}, enabled=enabled){Icon(Icons.Default.KeyboardArrowLeft,"",tint=Color.White)}
-                Text(timeSignatures[timeSignatureIndex],color=Color.White,fontWeight=FontWeight.SemiBold,fontSize=14.sp,modifier=Modifier.width(40.dp),textAlign=TextAlign.Center)
-                IconButton(onClick={timeSignatureIndex=(timeSignatureIndex+1)%timeSignatures.size}, enabled=enabled){Icon(Icons.Default.KeyboardArrowRight,"",tint=Color.White)}
-                Spacer(modifier=Modifier.width(8.dp))
-                Button(onClick={if(isMetronomeRunning)stopMetronome()else startMetronome()}, enabled=enabled, modifier=Modifier.fillMaxHeight(0.75f),contentPadding=PaddingValues(horizontal=10.dp),colors=ButtonDefaults.buttonColors(containerColor=if(isMetronomeRunning)Color(0xFFE53935)else Color(0xFF43A047))){}
+        Surface(
+            shape = RoundedCornerShape(12.dp),
+            color = Color.Black.copy(alpha = 0.7f),
+            border = BorderStroke(1.dp, Color.Gray.copy(alpha = 0.5f))
+        ) {
+            Row(
+                modifier = Modifier.height(48.dp).padding(horizontal = 8.dp),
+                horizontalArrangement = Arrangement.Center,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                IconButton(onClick = { if (tempo > 40) tempo-- }, enabled = enabled) {
+                    Icon(Icons.AutoMirrored.Filled.KeyboardArrowLeft, "", tint = Color.White)
+                }
+                Text(
+                    "$tempo BPM",
+                    color = Color.White,
+                    fontWeight = FontWeight.SemiBold,
+                    fontSize = 14.sp,
+                    modifier = Modifier.width(80.dp),
+                    textAlign = TextAlign.Center
+                )
+                IconButton(onClick = { if (tempo < 240) tempo++ }, enabled = enabled) {
+                    Icon(Icons.AutoMirrored.Filled.KeyboardArrowRight, "", tint = Color.White)
+                }
+                Spacer(Modifier.width(4.dp))
+                HorizontalDivider(modifier = Modifier.height(24.dp).width(1.dp), color = Color.Gray)
+                Spacer(Modifier.width(4.dp))
+                IconButton(onClick = { timeSignatureIndex = (timeSignatureIndex - 1 + timeSignatures.size) % timeSignatures.size }, enabled = enabled) {
+                    Icon(Icons.AutoMirrored.Filled.KeyboardArrowLeft, "", tint = Color.White)
+                }
+                Text(
+                    timeSignatures[timeSignatureIndex],
+                    color = Color.White,
+                    fontWeight = FontWeight.SemiBold,
+                    fontSize = 14.sp,
+                    modifier = Modifier.width(40.dp),
+                    textAlign = TextAlign.Center
+                )
+                IconButton(onClick = { timeSignatureIndex = (timeSignatureIndex + 1) % timeSignatures.size }, enabled = enabled) {
+                    Icon(Icons.AutoMirrored.Filled.KeyboardArrowRight, "", tint = Color.White)
+                }
+                Spacer(modifier = Modifier.width(8.dp))
+                Button(
+                    onClick = { if (isMetronomeRunning) stopMetronome() else startMetronome() },
+                    enabled = enabled,
+                    modifier = Modifier.fillMaxHeight(0.75f),
+                    contentPadding = PaddingValues(horizontal = 10.dp),
+                    colors = ButtonDefaults.buttonColors(
+                        containerColor = if (isMetronomeRunning) Color(0xFFE53935) else Color(0xFF43A047)
+                    )
+                ) {}
             }
         }
     }
 
     @Composable
     fun VisualizerToggleButton() {
-        Button(onClick={
-            val allModes=VisualizerMode.values()
-            visualizerMode = allModes[(allModes.indexOf(visualizerMode) + 1) % allModes.size]
-        }, colors = ButtonDefaults.buttonColors(containerColor = Color.Black, contentColor = Color.White))
-        {
+        Button(
+            onClick = {
+                val allModes = VisualizerMode.entries.toTypedArray()
+                visualizerMode = allModes[(allModes.indexOf(visualizerMode) + 1) % allModes.size]
+            },
+            colors = ButtonDefaults.buttonColors(containerColor = Color.Black, contentColor = Color.White)
+        ) {
             val vizName = when(visualizerMode) {
                 VisualizerMode.WAVEFORM -> "Wave"
                 VisualizerMode.BARS -> "Bars"
@@ -561,13 +844,18 @@ class MainActivity : ComponentActivity() {
     @Composable
     fun VisualizerDisplay() {
         Box(
-            modifier = Modifier.fillMaxWidth(0.9f).height(80.dp).background(Color.Black.copy(alpha = 0.6f), RoundedCornerShape(8.dp)).clip(RoundedCornerShape(8.dp)).padding(8.dp),
+            modifier = Modifier
+                .fillMaxWidth(0.9f)
+                .height(80.dp)
+                .background(Color.Black.copy(alpha = 0.6f), RoundedCornerShape(8.dp))
+                .clip(RoundedCornerShape(8.dp))
+                .padding(8.dp),
             contentAlignment = Alignment.Center
         ){
             when(visualizerMode){
                 VisualizerMode.BARS->BarsVisualizer(Modifier.fillMaxSize(), magnitudes)
                 VisualizerMode.WAVEFORM->WaveformVisualizer(Modifier.fillMaxSize(), scrollingWaveformData)
-                VisualizerMode.NONE->{Text("No Visualizer", color=Color.Gray, fontSize=12.sp)}
+                VisualizerMode.NONE->{ Text("No Visualizer", color=Color.Gray, fontSize=12.sp) }
             }
         }
     }
@@ -586,7 +874,11 @@ class MainActivity : ComponentActivity() {
                     val normalizedHeight = (mag / maxMagnitude).coerceIn(0f, 1f)
                     val barHeight = normalizedHeight * size.height
                     val color = lerp(Color.Green, Color.Red, normalizedHeight)
-                    drawRect(color = color, topLeft = Offset(x = index * barWidth, y = size.height - barHeight), size = Size(width = (barWidth - barSpacing).coerceAtLeast(0f), height = barHeight))
+                    drawRect(
+                        color = color,
+                        topLeft = Offset(x = index * barWidth, y = size.height - barHeight),
+                        size = Size(width = (barWidth - barSpacing).coerceAtLeast(0f), height = barHeight)
+                    )
                 }
             }
         }
@@ -598,37 +890,82 @@ class MainActivity : ComponentActivity() {
             val samplesToDisplay = 4096
             if (fullData.isEmpty()) return@Canvas
             val waveformSlice = fullData.takeLast(samplesToDisplay)
-            val displayData = if (waveformSlice.size < samplesToDisplay) { List(samplesToDisplay - waveformSlice.size) { 0f } + waveformSlice } else { waveformSlice }
+            val displayData = if (waveformSlice.size < samplesToDisplay) {
+                List(samplesToDisplay - waveformSlice.size) { 0f } + waveformSlice
+            } else { waveformSlice }
             val stepX = size.width / displayData.size
             val centerY = size.height / 2f
             val waveColor = Color(0xFF4CAF50)
             val centerLineColor = Color.Black.copy(alpha = 0.3f)
             val topPath = Path().apply {
                 moveTo(0f, centerY)
-                displayData.forEachIndexed { index, value -> lineTo(index * stepX, centerY - (value.coerceAtLeast(0f) * centerY)) }
+                displayData.forEachIndexed { index, value ->
+                    lineTo(index * stepX, centerY - (value.coerceAtLeast(0f) * centerY))
+                }
                 lineTo(size.width, centerY); close()
             }
             val bottomPath = Path().apply {
                 moveTo(0f, centerY)
-                displayData.forEachIndexed { index, value -> lineTo(index * stepX, centerY - (value.coerceAtMost(0f) * centerY)) }
+                displayData.forEachIndexed { index, value ->
+                    lineTo(index * stepX, centerY - (value.coerceAtMost(0f) * centerY))
+                }
                 lineTo(size.width, centerY); close()
             }
-            drawPath(path = topPath, color = waveColor); drawPath(path = bottomPath, color = waveColor)
-            drawLine(color = centerLineColor, start = Offset(0f, centerY), end = Offset(size.width, centerY), strokeWidth = 1.dp.toPx())
+            drawPath(path = topPath, color = waveColor)
+            drawPath(path = bottomPath, color = waveColor)
+            drawLine(
+                color = centerLineColor,
+                start = Offset(0f, centerY),
+                end = Offset(size.width, centerY),
+                strokeWidth = 1.dp.toPx()
+            )
         }
     }
 
-    @Composable fun LedTuningStrip(activeLedIndex:Int){Row(modifier=Modifier.shadow(elevation=8.dp,shape=RoundedCornerShape(6.dp),spotColor=Color.Green),horizontalArrangement=Arrangement.Center,verticalAlignment=Alignment.CenterVertically){(-5..5).forEach{index->
-        val isActive = when { activeLedIndex < 0 -> index in activeLedIndex until 0; activeLedIndex > 0 -> index in 1..activeLedIndex; else -> index == 0 }
-        val color=when{index==0->Color(0xFF00C853);abs(index)in 1..2->Color(0xFFFFFF00);else->Color(0xFFD50000)};LedIndicator(isActive=isActive,activeColor=color);if(index<5){Spacer(modifier=Modifier.width(2.dp))}}}}
-    @Composable fun LedIndicator(isActive:Boolean,activeColor:Color){val color=if(isActive)activeColor else Color.DarkGray.copy(alpha=0.5f);Box(modifier=Modifier.size(width=20.dp,height=24.dp).background(color,shape=RoundedCornerShape(4.dp)).border(width=1.dp,color=Color.Black.copy(alpha=0.3f),shape=RoundedCornerShape(4.dp)))}
+    @Composable
+    fun LedTuningStrip(activeLedIndex:Int) {
+        Row(
+            modifier = Modifier.shadow(elevation=8.dp, shape=RoundedCornerShape(6.dp), spotColor=Color.Green),
+            horizontalArrangement=Arrangement.Center,
+            verticalAlignment=Alignment.CenterVertically
+        ){
+            (-5..5).forEach{ index ->
+                val isActive = when {
+                    activeLedIndex < 0 -> index in activeLedIndex until 0
+                    activeLedIndex > 0 -> index in 1..activeLedIndex
+                    else -> index == 0
+                }
+                val color = when {
+                    index == 0 -> Color(0xFF00C853)
+                    abs(index) in 1..2 -> Color(0xFFFFFF00)
+                    else -> Color(0xFFD50000)
+                }
+                LedIndicator(isActive = isActive, activeColor = color)
+                if (index < 5) { Spacer(modifier = Modifier.width(2.dp)) }
+            }
+        }
+    }
+
+    @Composable
+    fun LedIndicator(isActive:Boolean, activeColor:Color) {
+        val color = if(isActive) activeColor else Color.DarkGray.copy(alpha=0.5f)
+        Box(
+            modifier = Modifier
+                .size(width=20.dp, height=24.dp)
+                .background(color, shape=RoundedCornerShape(4.dp))
+                .border(width=1.dp, color=Color.Black.copy(alpha=0.3f), shape=RoundedCornerShape(4.dp))
+        )
+    }
 }
 
 @Composable
 fun NativeAdView(ad: NativeAd) {
     AndroidView(
         modifier = Modifier.fillMaxWidth().padding(vertical = 8.dp),
-        factory = { context -> LayoutInflater.from(context).inflate(R.layout.ad_unified, null) as NativeAdView },
+        factory = { context ->
+            val adView = LayoutInflater.from(context).inflate(R.layout.ad_unified, null) as NativeAdView
+            adView
+        },
         update = { adView ->
             adView.headlineView = adView.findViewById(R.id.ad_headline)
             adView.bodyView = adView.findViewById(R.id.ad_body)

@@ -56,12 +56,13 @@ android {
 }
 
 dependencies {
-    implementation("com.google.android.gms:play-services-ads:24.4.0")
-    implementation("androidx.core:core-ktx:1.12.0")
-    implementation("androidx.lifecycle:lifecycle-runtime-ktx:2.6.2")
+    implementation("com.android.billingclient:billing-ktx:8.0.0")
+    implementation("com.google.android.gms:play-services-ads:24.5.0")
+    implementation("androidx.core:core-ktx:1.16.0")
+    implementation("androidx.lifecycle:lifecycle-runtime-ktx:2.9.2")
 
     // Jetpack Compose BOM (Bill of Materials) - Let this manage versions
-    implementation(platform("androidx.compose:compose-bom:2023.10.01")) // Use platform() for BOM
+    implementation(platform("androidx.compose:compose-bom:2025.07.00")) // Use platform() for BOM
     implementation("androidx.compose.ui:ui")
     implementation("androidx.compose.ui:ui-graphics")
     implementation("androidx.compose.ui:ui-tooling-preview")
@@ -72,13 +73,13 @@ dependencies {
 
     // Your other dependencies
     implementation(files("libs/TarsosDSP.jar"))
-    implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.7.3")
+    implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.10.2")
 
     // Test dependencies
     testImplementation("junit:junit:4.13.2")
-    androidTestImplementation("androidx.test.ext:junit:1.1.5")
-    androidTestImplementation("androidx.test.espresso:espresso-core:3.5.0") // Aligned version
-    androidTestImplementation(platform("androidx.compose:compose-bom:2023.10.01")) // BOM for tests
+    androidTestImplementation("androidx.test.ext:junit:1.2.1")
+    androidTestImplementation("androidx.test.espresso:espresso-core:3.6.1") // Aligned version
+    androidTestImplementation(platform("androidx.compose:compose-bom:2025.07.00")) // BOM for tests
     androidTestImplementation("androidx.compose.ui:ui-test-junit4")
 
     // Debug dependencies
