@@ -15,10 +15,8 @@ import android.widget.TextView
 import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
-import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.core.tween
 import androidx.compose.animation.fadeIn
-import androidx.compose.animation.slideInVertically
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.Image
@@ -82,6 +80,8 @@ import com.google.android.gms.ads.*
 import com.google.android.gms.ads.nativead.NativeAd
 import com.google.android.gms.ads.nativead.NativeAdOptions
 import com.google.android.gms.ads.nativead.NativeAdView
+import com.google.android.play.core.review.ReviewManager
+import com.google.android.play.core.review.ReviewManagerFactory
 import kotlinx.coroutines.*
 import java.util.Locale
 import kotlin.math.abs
@@ -109,6 +109,10 @@ class MainActivity : ComponentActivity() {
         private const val SCROLLING_WAVEFORM_MAX_SIZE = 16384
         private const val PRODUCT_ID = "1" // Replace with your real one-time product id from Play Console
         private const val PREF_AD_FREE = "pref_ad_free"
+        // --- IN-APP REVIEW CONSTANTS ---
+        private const val PREF_TUNE_COUNT = "pref_tune_count"
+        private const val PREF_REVIEW_REQUESTED = "pref_review_requested"
+        private const val TUNE_COUNT_FOR_REVIEW = 7
     }
 
     private var nativeAd by mutableStateOf<NativeAd?>(null)
@@ -150,6 +154,10 @@ class MainActivity : ComponentActivity() {
     private lateinit var billingClient: BillingClient
     private var adRemovalProductDetails: ProductDetails? = null
 
+    // --- IN-APP REVIEW MANAGER ---
+    private lateinit var reviewManager: ReviewManager
+
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
 
@@ -157,6 +165,9 @@ class MainActivity : ComponentActivity() {
         isAdFree = prefs.getBoolean(PREF_AD_FREE, false)
 
         setupBillingClient()
+
+        // --- IN-APP REVIEW INITIALIZATION ---
+        reviewManager = ReviewManagerFactory.create(this)
 
         MobileAds.initialize(this) {}
         if (!isAdFree) {
@@ -640,6 +651,8 @@ class MainActivity : ComponentActivity() {
                 if(System.currentTimeMillis() - inTuneStartTime >= IN_TUNE_DELAY_MS && !inTuneSoundPlayed) {
                     playFeedbackSound(soundIntune)
                     inTuneSoundPlayed = true
+                    // --- IN-APP REVIEW TRIGGER ---
+                    handleSuccessfulTuneForReview()
                 }
             } else {
                 inTuneStartTime = 0L
@@ -667,6 +680,40 @@ class MainActivity : ComponentActivity() {
             }
         }
     }
+
+    // --- START: IN-APP REVIEW LOGIC ---
+    private fun handleSuccessfulTuneForReview() {
+        val prefs = getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        val reviewAlreadyRequested = prefs.getBoolean(PREF_REVIEW_REQUESTED, false)
+
+        if (!reviewAlreadyRequested) {
+            var currentTuneCount = prefs.getInt(PREF_TUNE_COUNT, 0)
+            currentTuneCount++
+            prefs.edit { putInt(PREF_TUNE_COUNT, currentTuneCount) }
+
+            if (currentTuneCount >= TUNE_COUNT_FOR_REVIEW) {
+                showInAppReview()
+            }
+        }
+    }
+
+    private fun showInAppReview() {
+        val request = reviewManager.requestReviewFlow()
+        request.addOnCompleteListener { task ->
+            if (task.isSuccessful) {
+                val reviewInfo = task.result
+                val flow = reviewManager.launchReviewFlow(this, reviewInfo)
+                flow.addOnCompleteListener {
+                    getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE).edit {
+                        putBoolean(PREF_REVIEW_REQUESTED, true)
+                    }
+                }
+            } else {
+                Log.e(TAG, "In-app review flow request failed.", task.exception)
+            }
+        }
+    }
+    // --- END: IN-APP REVIEW LOGIC ---
 
     private fun startMetronome() {
         if(isMetronomeRunning || !soundsLoaded) return
@@ -757,12 +804,17 @@ class MainActivity : ComponentActivity() {
                 )
             }
             Spacer(modifier = Modifier.height(16.dp))
-            nativeAd?.let { ad ->
-                AnimatedVisibility(
-                    visible = isAdVisible && !isAdFree,
-                    enter = slideInVertically(initialOffsetY = { it / 2 }, animationSpec = tween(durationMillis = 500)) + fadeIn(animationSpec = tween(durationMillis = 500))
-                ) {
-                    NativeAdView(ad = ad)
+
+            // --- AD CONTAINER (no scope confusion / no AnimatedVisibility) ---
+            val adContainerHeight = 110.dp
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(adContainerHeight), // Fixed height to prevent layout jumps
+                contentAlignment = Alignment.Center
+            ) {
+                if (nativeAd != null && isAdVisible && !isAdFree) {
+                    NativeAdView(ad = nativeAd!!)
                 }
             }
         }
@@ -776,7 +828,9 @@ class MainActivity : ComponentActivity() {
             border = BorderStroke(1.dp, Color.Gray.copy(alpha = 0.5f))
         ) {
             Row(
-                modifier = Modifier.height(48.dp).padding(horizontal = 8.dp),
+                modifier = Modifier
+                    .height(48.dp)
+                    .padding(horizontal = 8.dp),
                 horizontalArrangement = Arrangement.Center,
                 verticalAlignment = Alignment.CenterVertically
             ) {
@@ -963,7 +1017,9 @@ class MainActivity : ComponentActivity() {
 @Composable
 fun NativeAdView(ad: NativeAd) {
     AndroidView(
-        modifier = Modifier.fillMaxWidth().padding(vertical = 8.dp),
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(vertical = 8.dp),
         factory = { context ->
             val adView = LayoutInflater.from(context).inflate(R.layout.ad_unified, null) as NativeAdView
             adView
@@ -973,10 +1029,12 @@ fun NativeAdView(ad: NativeAd) {
             adView.bodyView = adView.findViewById(R.id.ad_body)
             adView.callToActionView = adView.findViewById(R.id.ad_call_to_action)
             adView.iconView = adView.findViewById(R.id.ad_app_icon)
+
             (adView.headlineView as? TextView)?.text = ad.headline
             (adView.bodyView as? TextView)?.text = ad.body
             (adView.callToActionView as? Button)?.text = ad.callToAction
             (adView.iconView as? ImageView)?.setImageDrawable(ad.icon?.drawable)
+
             adView.setNativeAd(ad)
         }
     )

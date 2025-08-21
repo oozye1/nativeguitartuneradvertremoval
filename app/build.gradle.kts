@@ -12,7 +12,7 @@ android {
         applicationId = "co.uk.doverguitarteacher.voiceguitartuner" // Your package name
         minSdk = 24 // Or your project's minSdk
         targetSdk = 36 // Or your project's targetSdk
-        versionCode = 16
+        versionCode = 17
         versionName = "1"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
@@ -31,6 +31,8 @@ android {
                 getDefaultProguardFile("proguard-android-optimize.txt"),
                 "proguard-rules.pro"
             )
+            // CORRECTED: Use double quotes for the String in Kotlin DSL
+            ndk.debugSymbolLevel = "FULL"
         }
     }
     compileOptions {
@@ -56,6 +58,7 @@ android {
 }
 
 dependencies {
+    implementation("com.google.android.play:review-ktx:2.0.1")
     implementation("com.android.billingclient:billing-ktx:8.0.0")
     implementation("com.google.android.gms:play-services-ads:24.5.0")
     implementation("androidx.core:core-ktx:1.16.0")
@@ -74,6 +77,8 @@ dependencies {
     // Your other dependencies
     implementation(files("libs/TarsosDSP.jar"))
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.10.2")
+
+
 
     // Test dependencies
     testImplementation("junit:junit:4.13.2")
